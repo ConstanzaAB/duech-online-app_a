@@ -5,12 +5,16 @@ import { useSearchParams } from 'next/navigation';
 import { SelectDropdown, MultiSelectDropdown } from '@/components/common/dropdown';
 import SearchBar from '@/components/search/search-bar';
 import { searchDictionary } from '@/lib/dictionary-client';
-import { SearchResult } from '@/lib/definitions';
-import { STATUS_OPTIONS } from '@/lib/definitions';
+import {
+  MEANING_MARKER_KEYS,
+  MeaningMarkerKey,
+  SearchResult,
+  STATUS_OPTIONS,
+} from '@/lib/definitions';
 import { WordCard } from '@/components/search/word-card';
 import { AddWordModal } from '@/components/search/add-word-modal';
 import { useUrlSearchParams } from '@/hooks/useUrlSearchParams';
-import { useSearchState } from '@/hooks/useSearchState';
+import { useSearchState, type SearchState } from '@/hooks/useSearchState';
 import {
   SearchLoadingSkeleton,
   EmptySearchState,
@@ -19,7 +23,6 @@ import {
 } from '@/components/search/search-results-components';
 import { Pagination } from '@/components/search/pagination';
 import {
-  arraysEqual,
   filtersChanged,
   cloneFilters,
   LocalSearchFilters,
@@ -27,34 +30,38 @@ import {
   type User,
 } from '@/lib/search-utils';
 
-// Helper to check if current search state matches URL params
-function matchesUrlState(
-  searchState: {
-    query: string;
-    filters: LocalSearchFilters;
-    status: string;
-    assignedTo: string[];
-  },
-  urlParams: {
+const buildUrlSignature = (
+  params: {
     trimmedQuery: string;
     categories: string[];
-    styles: string[];
     origins: string[];
     letters: string[];
+    dictionaries: string[];
     status: string;
     assignedTo: string[];
-  }
-): boolean {
-  return (
-    searchState.query === urlParams.trimmedQuery &&
-    arraysEqual(searchState.filters.categories, urlParams.categories) &&
-    arraysEqual(searchState.filters.styles, urlParams.styles) &&
-    arraysEqual(searchState.filters.origins, urlParams.origins) &&
-    arraysEqual(searchState.filters.letters, urlParams.letters) &&
-    searchState.status === urlParams.status &&
-    arraysEqual(searchState.assignedTo, urlParams.assignedTo)
-  );
-}
+  } & Record<MeaningMarkerKey, string[]>
+): string => {
+  const markerSegment = MEANING_MARKER_KEYS.map((key) => params[key].join(',')).join('|');
+  return [
+    params.trimmedQuery,
+    params.categories.join(','),
+    params.origins.join(','),
+    params.letters.join(','),
+    params.dictionaries.join(','),
+    markerSegment,
+    params.status,
+    params.assignedTo.join(','),
+  ].join('|');
+};
+
+const stateHasCriteria = (state: SearchState, includeEditorFilters: boolean): boolean =>
+  state.query.length > 0 ||
+  state.filters.categories.length > 0 ||
+  state.filters.origins.length > 0 ||
+  state.filters.letters.length > 0 ||
+  state.filters.dictionaries.length > 0 ||
+  MEANING_MARKER_KEYS.some((key) => state.filters[key].length > 0) ||
+  (includeEditorFilters && (state.status.length > 0 || state.assignedTo.length > 0));
 
 // Helper to update state if query or filters changed
 function updateStateIfChanged(
@@ -79,34 +86,6 @@ function updateStateIfChanged(
     query,
     filters: hasFiltersChanged ? cloneFilters(filters) : prev.filters,
   };
-}
-
-// Helper to validate if URL-based search should proceed
-function shouldProceedWithUrlSearch(
-  editorMode: boolean,
-  hasUrlCriteria: boolean,
-  isInitialized: boolean
-): boolean {
-  if (!editorMode) return false;
-  if (!hasUrlCriteria) return false;
-  if (!isInitialized) return false;
-  return true;
-}
-
-// Helper to handle early returns in URL search effects
-function handleEarlyUrlSearchReturn(
-  editorMode: boolean,
-  urlParams: { hasUrlCriteria: boolean },
-  isInitialized: boolean,
-  urlSearchTriggeredRef: React.MutableRefObject<boolean>
-): boolean {
-  if (!shouldProceedWithUrlSearch(editorMode, urlParams.hasUrlCriteria, isInitialized)) {
-    if (editorMode && !urlParams.hasUrlCriteria) {
-      urlSearchTriggeredRef.current = false;
-    }
-    return true; // Should return early
-  }
-  return false; // Should continue
 }
 
 interface SearchPageProps {
@@ -139,13 +118,22 @@ export function SearchPage({
     urlParams,
   });
 
-  const urlSearchTriggeredRef = useRef(false);
+  const urlHasCriteria = urlParams.hasUrlCriteria;
+
+  const urlSignature = useMemo(() => buildUrlSignature(urlParams), [urlParams]);
+
+  const stateInitiallyHasCriteria = stateHasCriteria(searchState, editorMode);
+
+  const latestRequestRef = useRef(0);
+  const initialSearchTriggeredRef = useRef(false);
+  const previousUrlSignatureRef = useRef(urlSignature);
 
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [isLoading, setIsLoading] = useState(!editorMode);
+  const [isLoading, setIsLoading] = useState(() => stateInitiallyHasCriteria);
   const [hasSearched, setHasSearched] = useState(false);
   const [totalResults, setTotalResults] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
+  const [lastExecutedQuery, setLastExecutedQuery] = useState(''); // Track the query used in the last search
   const [pagination, setPagination] = useState({
     totalPages: 0,
     hasNext: false,
@@ -157,101 +145,64 @@ export function SearchPage({
   // Editor mode: Use users passed from server
   const availableUsers = initialUsers;
 
-  const initialFilters = useMemo(
-    () => ({
-      categories: urlParams.categories,
-      styles: urlParams.styles,
-      origins: urlParams.origins,
-      letters: urlParams.letters,
-    }),
-    [urlParams.categories, urlParams.styles, urlParams.origins, urlParams.letters]
+  const hasEditorFilters = searchState.status.length > 0 || searchState.assignedTo.length > 0;
+  const hasMarkerFilters = useMemo(
+    () => MEANING_MARKER_KEYS.some((key) => searchState.filters[key].length > 0),
+    [searchState.filters]
   );
+  const hasSearchCriteria = stateHasCriteria(searchState, editorMode);
 
-  // Reset URL search trigger when URL params change
+  // Reset bookkeeping when public URL params change so new criteria trigger a fresh search
   useEffect(() => {
-    if (handleEarlyUrlSearchReturn(editorMode, urlParams, isInitialized, urlSearchTriggeredRef)) {
+    if (editorMode) {
       return;
     }
 
-    if (!matchesUrlState(searchState, urlParams)) {
-      urlSearchTriggeredRef.current = false;
+    if (previousUrlSignatureRef.current === urlSignature) {
+      return;
+    }
+
+    previousUrlSignatureRef.current = urlSignature;
+    initialSearchTriggeredRef.current = false;
+
+    if (urlHasCriteria) {
+      setHasSearched(false);
+      setIsLoading(true);
+      setCurrentPage(1);
+      return;
+    }
+
+    if (!stateHasCriteria(searchState, false)) {
       setHasSearched(false);
       setSearchResults([]);
       setTotalResults(0);
-    }
-  }, [editorMode, isInitialized, urlParams, searchState]);
-
-  // Auto-search on mount for public mode
-  useEffect(() => {
-    if (editorMode || hasSearched) return;
-
-    let cancelled = false;
-
-    const hasSearchCriteria =
-      Boolean(urlParams.trimmedQuery) ||
-      initialFilters.categories.length > 0 ||
-      initialFilters.styles.length > 0 ||
-      initialFilters.origins.length > 0 ||
-      initialFilters.letters.length > 0;
-
-    if (!hasSearchCriteria) {
-      setSearchResults([]);
-      setTotalResults(0);
+      setCurrentPage(1);
+      setLastExecutedQuery('');
+      setPagination({ totalPages: 0, hasNext: false, hasPrev: false });
       setIsLoading(false);
-      return;
     }
-
-    const executeInitialSearch = async () => {
-      setIsLoading(true);
-      try {
-        const data = await searchDictionary(
-          {
-            query: urlParams.trimmedQuery,
-            categories: initialFilters.categories,
-            styles: initialFilters.styles,
-            origins: initialFilters.origins,
-            letters: initialFilters.letters,
-          },
-          1,
-          RESULTS_PER_PAGE
-        );
-
-        if (!cancelled) {
-          setSearchResults(data.results);
-          setTotalResults(data.pagination.total);
-          setPagination({
-            totalPages: data.pagination.totalPages,
-            hasNext: data.pagination.hasNext,
-            hasPrev: data.pagination.hasPrev,
-          });
-          setCurrentPage(1);
-          setHasSearched(true);
-        }
-      } catch {
-        if (!cancelled) {
-          setSearchResults([]);
-          setTotalResults(0);
-          setPagination({ totalPages: 0, hasNext: false, hasPrev: false });
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-      }
-    };
-
-    executeInitialSearch();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [editorMode, hasSearched, urlParams.query, urlParams.trimmedQuery, initialFilters]);
+  }, [editorMode, searchState, urlHasCriteria, urlSignature]);
 
   const handleSearchStateChange = useCallback(
     ({ query, filters }: { query: string; filters: LocalSearchFilters }) => {
-      updateState((prev) => updateStateIfChanged(prev, query, filters));
+      // Editor mode: avoid triggering searches while typing so only manual submits run queries.
+      // Keep the last executed query in state until the user submits and still update filters for visual feedback.
+      updateState((prev) => {
+        if (editorMode) {
+          const hasFiltersChanged = filtersChanged(prev.filters, filters);
+          if (!hasFiltersChanged) {
+            return prev; // Ignore live query changes
+          }
+          return {
+            ...prev,
+            filters: cloneFilters(filters),
+          };
+        }
+        // Public mode keeps live synchronization between the bar and the URL-driven state
+        return updateStateIfChanged(prev, query, filters);
+      });
     },
-    [updateState]
+    [updateState, editorMode]
   );
 
   const handleStatusChange = useCallback(
@@ -292,17 +243,22 @@ export function SearchPage({
       filters: LocalSearchFilters;
       page?: number;
     }) => {
+      const requestId = latestRequestRef.current + 1;
+      latestRequestRef.current = requestId;
       setIsLoading(true);
-      setHasSearched(true);
+      let nextStateSnapshot: SearchState | null = null;
+
+      updateState((prev) => {
+        const next = updateStateIfChanged(prev, query, filters);
+        nextStateSnapshot = next;
+        return next;
+      });
 
       try {
         const searchData = await searchDictionary(
           {
             query,
-            categories: filters.categories,
-            styles: filters.styles,
-            origins: filters.origins,
-            letters: filters.letters,
+            ...filters,
           },
           page,
           RESULTS_PER_PAGE,
@@ -310,6 +266,10 @@ export function SearchPage({
           editorMode ? searchState.assignedTo : undefined,
           editorMode
         );
+
+        if (requestId !== latestRequestRef.current) {
+          return;
+        }
 
         setSearchResults(searchData.results);
         setTotalResults(searchData.pagination.total);
@@ -319,18 +279,22 @@ export function SearchPage({
           hasPrev: searchData.pagination.hasPrev,
         });
         setCurrentPage(page);
-
-        updateState((prev) => updateStateIfChanged(prev, query, filters));
-
-        if (editorMode) {
-          setTimeout(() => saveFilters(), 0);
-        }
+        setLastExecutedQuery(query); // Save the query that was actually executed
       } catch {
+        if (requestId !== latestRequestRef.current) {
+          return;
+        }
         setSearchResults([]);
         setTotalResults(0);
         setPagination({ totalPages: 0, hasNext: false, hasPrev: false });
       } finally {
-        setIsLoading(false);
+        if (requestId === latestRequestRef.current) {
+          setHasSearched(true);
+          setIsLoading(false);
+          if (nextStateSnapshot) {
+            saveFilters(nextStateSnapshot);
+          }
+        }
       }
     },
     [
@@ -343,13 +307,82 @@ export function SearchPage({
     ]
   );
 
+  useEffect(() => {
+    if (!isInitialized) {
+      return;
+    }
+
+    if (hasSearched || initialSearchTriggeredRef.current) {
+      return;
+    }
+
+    if (!hasSearchCriteria) {
+      setIsLoading(false);
+      return;
+    }
+
+    initialSearchTriggeredRef.current = true;
+
+    const initialQuery = editorMode
+      ? searchState.query
+      : urlHasCriteria
+        ? urlParams.trimmedQuery
+        : searchState.query;
+
+    const filtersForAutoSearch = editorMode
+      ? searchState.filters
+      : urlHasCriteria
+        ? (() => {
+            const snapshot = {
+              categories: [...urlParams.categories],
+              origins: [...urlParams.origins],
+              letters: [...urlParams.letters],
+            } as LocalSearchFilters;
+            for (const key of MEANING_MARKER_KEYS) {
+              snapshot[key] = [...urlParams[key]];
+            }
+            return snapshot;
+          })()
+        : searchState.filters;
+
+    void executeSearch({
+      query: initialQuery,
+      filters: filtersForAutoSearch,
+    });
+  }, [
+    editorMode,
+    executeSearch,
+    hasSearchCriteria,
+    hasSearched,
+    isInitialized,
+    searchState.filters,
+    searchState.query,
+    urlHasCriteria,
+    urlParams,
+    urlSignature,
+  ]);
+
+  // Shared manual search handler that normalizes the payload before executing
+  const handleManualSearch = useCallback(
+    async ({ query, filters }: { query: string; filters: LocalSearchFilters }) => {
+      const trimmedQuery = query.trim();
+      const normalizedFilters = cloneFilters(filters);
+
+      await executeSearch({ query: trimmedQuery, filters: normalizedFilters, page: 1 });
+    },
+    [executeSearch]
+  );
+
   const handleClearAll = useCallback(() => {
     clearAll();
     setSearchResults([]);
     setHasSearched(false);
     setTotalResults(0);
     setCurrentPage(1);
+    setLastExecutedQuery('');
     setPagination({ totalPages: 0, hasNext: false, hasPrev: false });
+    setIsLoading(false);
+    initialSearchTriggeredRef.current = false;
   }, [clearAll]);
 
   const handlePageChange = useCallback(
@@ -368,38 +401,37 @@ export function SearchPage({
     [pagination.totalPages, executeSearch, searchState.query, searchState.filters]
   );
 
-  // Trigger search when URL params match current state in editor mode
+  // Editor mode no longer synchronizes with the URL; public history still relies on the earlier effect
+
+  const userOptions = useMemo(() => getLexicographerOptions(availableUsers), [availableUsers]);
+
   useEffect(() => {
-    if (handleEarlyUrlSearchReturn(editorMode, urlParams, isInitialized, urlSearchTriggeredRef)) {
+    if (!editorMode) {
+      return;
+    }
+    if (hasSearched) {
+      return;
+    }
+    if (initialSearchTriggeredRef.current) {
+      return;
+    }
+    if (!hasSearchCriteria) {
       return;
     }
 
-    if (!matchesUrlState(searchState, urlParams)) {
-      urlSearchTriggeredRef.current = false;
-      return;
-    }
-
-    if (urlSearchTriggeredRef.current) return;
-
-    urlSearchTriggeredRef.current = true;
-
+    initialSearchTriggeredRef.current = true;
     void executeSearch({
       query: searchState.query,
       filters: searchState.filters,
     });
-  }, [editorMode, executeSearch, isInitialized, urlParams, searchState]);
-
-  const userOptions = useMemo(() => getLexicographerOptions(availableUsers), [availableUsers]);
-
-  const hasEditorFilters = searchState.status.length > 0 || searchState.assignedTo.length > 0;
-
-  const hasSearchCriteria =
-    searchState.query.length > 0 ||
-    searchState.filters.categories.length > 0 ||
-    searchState.filters.styles.length > 0 ||
-    searchState.filters.origins.length > 0 ||
-    searchState.filters.letters.length > 0 ||
-    (editorMode && hasEditorFilters);
+  }, [
+    editorMode,
+    executeSearch,
+    hasSearched,
+    hasSearchCriteria,
+    searchState.filters,
+    searchState.query,
+  ]);
 
   // Memoize filter components for editor mode
   const statusFilter = useMemo(
@@ -467,14 +499,14 @@ export function SearchPage({
           placeholder={placeholder}
           initialValue={searchState.query}
           initialFilters={searchState.filters}
-          onSearch={executeSearch}
+          onSearch={handleManualSearch}
           onStateChange={handleSearchStateChange}
           onClearAll={editorMode ? handleClearAll : undefined}
           additionalFilters={additionalFiltersConfig}
           initialAdvancedOpen={
             editorMode &&
             (searchState.filters.categories.length > 0 ||
-              searchState.filters.styles.length > 0 ||
+              hasMarkerFilters ||
               searchState.filters.origins.length > 0 ||
               searchState.filters.letters.length > 0 ||
               hasEditorFilters)
@@ -485,7 +517,7 @@ export function SearchPage({
 
       {/* Results Section */}
       <div>
-        {isLoading ? (
+        {isLoading && !hasSearched ? (
           <SearchLoadingSkeleton editorMode={editorMode} />
         ) : hasSearched || (!editorMode && hasSearchCriteria) ? (
           searchResults.length > 0 ? (
@@ -493,7 +525,7 @@ export function SearchPage({
               <SearchResultsCount
                 editorMode={editorMode}
                 totalResults={totalResults}
-                query={searchState.query}
+                query={lastExecutedQuery}
                 currentPage={currentPage}
                 pageSize={RESULTS_PER_PAGE}
               />

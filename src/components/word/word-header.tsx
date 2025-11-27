@@ -5,9 +5,10 @@ import { useMemo, useState, useEffect} from 'react';
 import Link from 'next/link';
 import InlineEditable from '@/components/word/inline-editable';
 import { SelectDropdown } from '@/components/common/dropdown';
+import { Button } from '@/components/common/button';
 import { InformationCircleIcon } from '@/components/icons';
 import WordWarning from '@/components/word/word-warning';
-import type { WordDefinition } from '@/lib/definitions';
+import { DICCIONARIES, type Meaning } from '@/lib/definitions';
 import { useUserRole } from '@/hooks/useUserRole';
 import { getLexicographerByRole } from '@/lib/search-utils';
 import { getStatusByRole } from '@/lib/search-utils';
@@ -29,6 +30,9 @@ interface WordHeaderProps {
   editingRoot: boolean;
   onStartEditRoot: () => void;
   onCancelEditRoot: () => void;
+  // Dictionary field
+  dictionary: string | null;
+  onDictionaryChange: (value: string | null) => void;
   // Editor controls
   letter: string;
   onLetterChange: (value: string) => void;
@@ -41,7 +45,9 @@ interface WordHeaderProps {
   statusOptions: Array<{ value: string; label: string }>;
   searchPath: string;
   searchLabel: string;
-  definitions?: WordDefinition[];
+  definitions?: Meaning[];
+  onDeleteWord?: () => void;
+  userRole?: string;
 }
 
 export function WordHeader({
@@ -59,6 +65,8 @@ export function WordHeader({
   editingRoot,
   onStartEditRoot,
   onCancelEditRoot,
+  dictionary,
+  onDictionaryChange,
   letter,
   onLetterChange,
   letterOptions,
@@ -71,16 +79,18 @@ export function WordHeader({
   searchPath,
   searchLabel,
   definitions,
+  onDeleteWord,
+  userRole,
 }: WordHeaderProps) {
-  const { isAdmin, isCoordinator, isLexicographer, username } = useUserRole(true);
+  const { isAdmin, isLexicographer, username } = useUserRole(true);
 
   const userOptions = useMemo(
-    () => getLexicographerByRole(users, username, isAdmin, isCoordinator, isLexicographer),
-    [users, username, isAdmin, isCoordinator, isLexicographer] // ← all dependencies
+    () => getLexicographerByRole(users, username, isAdmin, isLexicographer),
+    [users, username, isAdmin, isLexicographer] // ← all dependencies
   );
   const statusFilters = useMemo(
-    () => getStatusByRole(statusOptions, isAdmin, isCoordinator, isLexicographer),
-    [statusOptions, isAdmin, isCoordinator, isLexicographer]
+    () => getStatusByRole(statusOptions, isAdmin, isLexicographer),
+    [statusOptions, isAdmin, isLexicographer]
   );
 
   const assignedUserName = useMemo(() => {
@@ -124,26 +134,47 @@ export function WordHeader({
             />
           </h1>
           <div className="flex items-center gap-2">
-            <span className="text-lg text-gray-700">Palabra base:</span>
-            <span className="text-duech-blue font-semibold">
-              <InlineEditable
-                value={root}
-                onChange={onRootChange}
-                editorMode={canActuallyEdit}
-                editing={editingRoot}
-                onStart={onStartEditRoot}
-                onCancel={onCancelEditRoot}
-                saveStrategy="manual"
-                placeholder="Palabra base"
-                addLabel="+ Añadir palabra base"
-              />
-            </span>
+            {/* Show root: in editor mode always, in public mode only if different from lemma */}
+            {(editorMode || (root && root !== lemma)) && (
+              <>
+                <span className="text-lg text-gray-700">Palabra base:</span>
+                <span className="text-duech-blue font-semibold">
+                  <InlineEditable
+                    value={root}
+                    onChange={onRootChange}
+                    editorMode={canActuallyEdit}
+                    editing={editingRoot}
+                    onStart={onStartEditRoot}
+                    onCancel={onCancelEditRoot}
+                    saveStrategy="manual"
+                    placeholder="Palabra base"
+                    addLabel="+ Añadir palabra base"
+                  />
+                </span>
+              </>
+            )}
           </div>
+          {/* Show dictionary source in public mode */}
+          {!editorMode && dictionary && (
+            <div className="text-sm text-gray-600">
+              <span className="font-medium">Fuente:</span> {dictionary}
+            </div>
+          )}
         </div>
 
         {/* Editor controls */}
         {editorMode && (
-          <div className="flex flex-wrap items-center gap-3 text-sm">
+          <div className="flex flex-wrap items-end gap-3 text-sm">
+            <div className="w-32">
+              <SelectDropdown
+                label="Diccionario"
+                options={DICCIONARIES}
+                selectedValue={dictionary || ''}
+                onChange={(val) => onDictionaryChange(val || null)}
+                placeholder="Seleccionar"
+                disabled={!canActuallyEdit}
+              />
+            </div>
             <div className="w-24">
               <SelectDropdown
                 label="Letra"
@@ -176,6 +207,16 @@ export function WordHeader({
                 disabled={!canActuallyEdit && !canChangeStatus}
               />
             </div>
+
+            {onDeleteWord && (userRole === 'admin' || userRole === 'superadmin') && (
+              <Button
+                type="button"
+                onClick={onDeleteWord}
+                className="rounded-md bg-red-600 px-4 py-2 text-white hover:bg-red-700"
+              >
+                Eliminar palabra
+              </Button>
+            )}
           </div>
         )}
       </div>

@@ -14,6 +14,7 @@ import {
   GlobeIcon,
   MenuIcon,
   CloseIcon,
+  BookOpenIcon,
 } from '@/components/icons';
 
 // Navigation link component with icon
@@ -222,6 +223,12 @@ export default function Header({ editorMode, initialUser = null }: HeaderProps) 
                 {editorMode && user && (user.role === 'admin' || user.role === 'superadmin') && (
                   <NavLink href={buildHref('/usuarios')} icon={UsersIcon} onClick={closeMenu}>
                     Gestión de usuarios
+
+                  </NavLink>
+                )}
+                {editorMode && (
+                  <NavLink href={buildHref('/redactadas')} icon={BookOpenIcon} onClick={closeMenu}>
+                    Palabras redactadas
                   </NavLink>
                 )}
                 {editorMode && (

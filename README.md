@@ -1,4 +1,4 @@
-# DUECh Online - Dictionary of Chilean Spanish
+# DUECh en línea - Dictionary of Chilean Spanish
 
 Web application for the Dictionary of Chilean Spanish Usage (DUECh).
 
@@ -110,7 +110,6 @@ The application includes several API endpoints:
 - `/api/search` - Basic text search
 - `/api/search/advanced` - Advanced search with filters
 - `/api/words/[lemma]` - Get specific word by lemma
-- `/api/metadata` - Get dictionary metadata
 
 > **Tip:** To access the editor interface via subdomain, add `127.0.0.1 editor.localhost` to your hosts file and visit `http://editor.localhost:3000`. Middleware rewrites the request to `/editor/buscar`.
 
