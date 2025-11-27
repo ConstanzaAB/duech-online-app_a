@@ -116,7 +116,11 @@ export function getLexicographerByRole(
   isLexicographer: boolean
 ) {
   if (isAdmin) {
-    return mapUsersToOptions(filterLexicographers(users));
+    return mapUsersToOptions(
+      users.filter((u) =>
+        u.role === 'lexicographer' || u.username === currentUsername
+      )
+    );
   }
 
   if (isLexicographer) {
